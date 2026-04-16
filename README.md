@@ -1,23 +1,25 @@
-# UniFi to Cloudflare Dual-WAN DDNS (Stateless Worker)
+# UniFi to Cloudflare Dual-WAN DDNS (Stateless & Log-Enabled)
 
-A zero-configuration, secure Cloudflare Worker designed to update multiple A records for the same domain across different WAN interfaces. 
+A secure, stateless Cloudflare Worker designed to update multiple A records for a single domain across different UniFi WAN interfaces. This version is optimized for strict `inadyn` compatibility and includes verbose logging for easy troubleshooting.
 
-## Why This Exists
-UniFi's built-in DDNS client (`inadyn`) is designed for a 1-to-1 mapping of hostname to IP. In a Dual-WAN environment, if you try to update the same domain from both WAN1 and WAN2, they will overwrite each other. 
+## Why This Project?
+UniFi gateways use `inadyn` for DDNS. Native Cloudflare support in UniFi often fails with Dual-WAN because it can't distinguish between which record belongs to which WAN. 
 
-This Worker uses **Cloudflare DNS Comments** as unique identifiers. By tagging your DNS records in Cloudflare with a comment (like `WAN1` and `WAN2`), the Worker ensures that WAN1 only ever updates the WAN1 record, and WAN2 only ever updates the WAN2 record.
+This Worker solves this by using **Cloudflare DNS Comments** (or Record IDs) as unique anchors. It identifies the target record based on the "Username" you provide in the UniFi GUI.
 
-## Features
-* **No Record IDs Needed:** Uses human-readable DNS comments (e.g., "WAN1") to identify records.
-* **Zero Worker Config:** No environment variables or secrets are required in the Cloudflare Dashboard.
-* **Stateless & Secure:** API keys are transmitted via HTTP Basic Auth headers, keeping them out of URL logs.
-* **Dynamic Zone Lookup:** Automatically finds your Cloudflare Zone ID based on the hostname provided by UniFi.
+## Key Features
+- **Stateless Architecture:** No environment variables or secrets are stored in the Cloudflare Dashboard.
+- **Enhanced Compatibility:** Returns specific codes (`good`, `nochg`, `badauth`, `911`) required by UniFi to show correct status.
+- **Verbose Logging:** Real-time feedback via the Cloudflare Workers Log stream.
+- **Flexible Identification:** Use either a human-readable **DNS Comment** (e.g., `WAN1`) or a specific **Record ID** in the Username field.
+- **Safe Updates:** Uses the HTTP `PATCH` method to update only the IP, preserving your Proxy (CDN) and TTL settings.
 
 ## Prerequisites
 1. **Cloudflare API Token:** Requires `Zone:Zone:Read` and `Zone:DNS:Edit` permissions.
-2. **DNS Record Setup:** * Create two `A` records for your domain (e.g., `example.com`).
-   * Add a comment to the first record: `WAN1`.
-   * Add a comment to the second record: `WAN2`.
+2. **DNS Record Setup:**
+   - Create two `A` records for your domain (e.g., `example.com`).
+   - Add a comment to the first record: `WAN1`.
+   - Add a comment to the second record: `WAN2`.
 
 ## Installation
 1. Create a private GitHub repository.
@@ -27,23 +29,27 @@ This Worker uses **Cloudflare DNS Comments** as unique identifiers. By tagging y
 
 ## UniFi Configuration
 
-Go to **Settings > Internet** in your UniFi Network Application and configure each WAN as follows:
+Navigate to **Settings > Internet** in the UniFi Network Application:
 
 ### WAN 1
-* **Service:** `Custom`
-* **Hostname:** `example.com`
-* **Username:** `WAN1` *(Must match the comment in Cloudflare)*
-* **Password:** `<Cloudflare API Token>`
-* **Server:** `your-worker-subdomain.workers.dev/update?ip=%i&hostname=%h`
-  > ⚠️ **IMPORTANT:** Do not include `https://` in the Server field. Do not include `%u` or `%p`.
+- **Service:** `Custom`
+- **Hostname:** `example.com`
+- **Username:** `WAN1` (Must match the comment in Cloudflare)
+- **Password:** `<Cloudflare API Token>`
+- **Server:** `your-worker-subdomain.workers.dev/update?ip=%i&hostname=%h`
+  > ⚠️ **IMPORTANT:** Do not include `https://` in the Server field.
 
 ### WAN 2
-* **Service:** `Custom`
-* **Hostname:** `example.com`
-* **Username:** `WAN2` *(Must match the comment in Cloudflare)*
-* **Password:** `<Cloudflare API Token>`
-* **Server:** `your-worker-subdomain.workers.dev/update?ip=%i&hostname=%h`
+- **Service:** `Custom`
+- **Hostname:** `example.com`
+- **Username:** `WAN2`
+- **Password:** `<Cloudflare API Token>`
+- **Server:** `your-worker-subdomain.workers.dev/update?ip=%i&hostname=%h`
 
-## Troubleshooting
-* `bad_tag`: Check if your Cloudflare DNS record actually has the comment `WAN1` or `WAN2`.
-* `badauth`: Ensure your API Token is correct and has the necessary permissions.
+## How to Debug (Logging)
+If your records aren't updating:
+1. Log into your Cloudflare Dashboard.
+2. Go to **Workers & Pages** > Select your Worker.
+3. Click the **Logs** tab > **Begin log stream**.
+4. Trigger an update in UniFi (e.g., by changing a character in the password and saving).
+5. The Worker will output step-by-step logs showing Zone lookups and API responses.
