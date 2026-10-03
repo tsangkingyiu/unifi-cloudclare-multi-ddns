@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-10-03
+### Added
+- **Multi-part TLD Zone Lookup:** Zone resolution is now multi-level-TLD aware: the Worker first asks the API for a zone matching the exact hostname (one call, TLD-shape agnostic), and otherwise lists the zones reachable with the token (`per_page=50`, page-number paginated) and picks the **longest** zone name the hostname suffix-matches. Hostnames under zones such as `.co.uk` / `.com.hk` now resolve; previously the `split('.').slice(-2).join('.')` heuristic queried just `co.uk` and failed with `badauth`. A hostname under no accessible zone returns `nohost` (404) instead of the misleading `badauth`.
+
+### Fixed
+- **List Items Pagination:** `GET /accounts/{account_id}/rules/lists/{list_id}/items` is cursor-paginated (`result_info.cursors`, `per_page` up to 500). The sync now requests `per_page=100` and follows the cursor until every page is read, so the replace-all `PUT` can no longer drop entries stored beyond the first page (#10).
+
+### Changed
+- **Skip List Sync on No-Change Check-ins:** When the DNS record already carries the WAN IP (`record.content === ip` → `nochg`), `syncTrustedIpsList` exits before making any list API calls — static-IP deployments stop burning a GET+PUT round trip on every periodic check-in. Comment tags are bookkeeping only (WAF rules match IPs), and missing/legacy-tagged entries self-heal on the next real IP change (#10).
+
 ## [1.3.3] - 2026-10-03
 ### Fixed
 - **Strict Item Mapping & Canonical PUT:** `syncTrustedIpsList` (steps 7c/7d) now filters and strictly maps list items to only the allowed properties `(ip, comment)`, stripping server metadata (`id`, `created_on`, `modified_on`) that the API could reject with `filters.api.invalid_json` (code 10026). The replace-all `PUT` sends a single canonical bare item-array body; the wrapped-`{"items":[...]}` shape fallback from 1.3.2 is no longer needed. Non-fatal semantics unchanged (#8).

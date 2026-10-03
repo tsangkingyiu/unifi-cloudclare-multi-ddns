@@ -28,22 +28,55 @@ export default {
     }
 
     try {
-      // 3. Dynamic Zone Lookup
+      // 3. Dynamic Zone Lookup (multi-level TLD aware)
+      // Fast path: ask the API for a zone whose name equals the hostname (apex
+      // DNS hosts resolve in one call, for any TLD shape). If the hostname is a
+      // subdomain — or the TLD is multi-part (e.g. .co.uk, .com.hk), where a
+      // naive split('.').slice(-2).join('.') would query just "co.uk" — fall
+      // back to listing the zones this token can access and suffix-matching the
+      // LONGEST zone name against the hostname.
       console.log(`[Cloudflare] Looking up Zone ID for: ${hostname}`);
-      const zoneRes = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${hostname.split('.').slice(-2).join('.')}`, {
+      const zoneRes = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(hostname)}`, {
         headers: { "Authorization": `Bearer ${apiToken}` }
       });
       const zoneData = await zoneRes.json();
 
-      if (!zoneData.success || zoneData.result.length === 0) {
-        console.error("[Cloudflare] Zone not found or Token invalid", zoneData.errors);
+      if (!zoneData.success) {
+        console.error("[Cloudflare] Zone lookup failed or Token invalid", zoneData.errors);
         return new Response("badauth", { status: 401 });
       }
-      const zoneId = zoneData.result[0].id;
-      console.log(`[Cloudflare] Zone ID identified: ${zoneId}`);
+      let zone = zoneData.result.length > 0 ? zoneData.result[0] : null;
+      if (!zone) {
+        console.log(`[Cloudflare] Exact-name lookup empty for "${hostname}"; matching hostname suffix across accessible zones`);
+        const accessible = [];
+        let page = 1, totalPages = 1;
+        do {
+          const listRes = await fetch(`https://api.cloudflare.com/client/v4/zones?per_page=50&page=${page}`, {
+            headers: { "Authorization": `Bearer ${apiToken}` }
+          });
+          const listData = await listRes.json();
+          if (!listData.success) {
+            console.error("[Cloudflare] Zone listing failed or Token invalid", listData.errors);
+            return new Response("badauth", { status: 401 });
+          }
+          accessible.push(...(listData.result || []));
+          totalPages = listData.result_info?.total_pages || 1;
+        } while (++page <= totalPages);
+        // A hostname belongs to a zone when it equals the zone name or ends with
+        // "." + zone name; the longest matching name wins (most specific zone).
+        zone = accessible
+          .filter(z => hostname === z.name || hostname.endsWith("." + z.name))
+          .sort((a, b) => b.name.length - a.name.length)[0] || null;
+      }
+      if (!zone) {
+        console.error(`[Cloudflare] No accessible zone covers hostname ${hostname}`);
+        return new Response("nohost", { status: 404 });
+      }
+      const zoneId = zone.id;
+      console.log(`[Cloudflare] Zone ID identified: ${zoneId} (${zone.name})`);
 
       // Account-level resources (WAF IP Lists) live under the account that owns the zone.
-      const accountId = zoneData.result[0].account.id;
+      const accountId = zone.account?.id;
       console.log(`[Cloudflare] Account ID identified: ${accountId}`);
 
       // 4. Find the Specific DNS Record by Name AND Comment
@@ -70,8 +103,10 @@ export default {
       // 5. Check if update is needed
       if (record.content === ip) {
         console.log(`[Success] IP matches current record (${ip}). No update needed.`);
-        // 7. Even without a DNS change, make sure the WAF IP List carries this WAN's IP.
-        await scheduleListSync(ctx, apiToken, accountId, wanTag, ip);
+        // 7. Nothing changed: the list sync exits immediately (zero list API
+        // calls) via the early-exit gate in syncTrustedIpsList; it resumes
+        // (and self-heals the list) on the next real IP change.
+        await scheduleListSync(ctx, apiToken, accountId, wanTag, ip, true);
         return new Response("nochg", { status: 200 });
       }
 
@@ -119,8 +154,8 @@ export default {
 //
 // This step is NON-BLOCKING and NON-FATAL: it must never change the DDNS response the
 // UniFi gateway receives ("good"/"nochg" whenever the DNS A record succeeded).
-async function scheduleListSync(ctx, apiToken, accountId, wanTag, ip) {
-  const job = syncTrustedIpsList(apiToken, accountId, wanTag, ip);
+async function scheduleListSync(ctx, apiToken, accountId, wanTag, ip, ipUnchanged = false) {
+  const job = syncTrustedIpsList(apiToken, accountId, wanTag, ip, ipUnchanged);
   try {
     if (ctx && typeof ctx.waitUntil === "function") {
       // Return the DDNS response right away; keep the Worker alive until the sync finishes.
@@ -134,8 +169,18 @@ async function scheduleListSync(ctx, apiToken, accountId, wanTag, ip) {
   }
 }
 
-async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
+async function syncTrustedIpsList(apiToken, accountId, wanTag, ip, ipUnchanged = false) {
   const LIST_NAME = "my_trusted_ips";
+  // Early exit for periodic no-change check-ins: static WAN IPs keep re-registering
+  // the same address, so when the DNS record already carries it the list is already
+  // correct — skipping avoids a redundant GET+PUT round trip on every check-in.
+  // Comment tags are only our bookkeeping (WAF rules match IPs, not comments), so a
+  // stable IP is safe to skip; missing/legacy-tagged entries self-heal on the next
+  // real IP change.
+  if (ipUnchanged) {
+    console.log(`[IP List] WAN IP ${ip} unchanged on record; skipping list sync`);
+    return;
+  }
   // This WAN's entries are tagged with the raw WAN tag ("WAN1"); versions of the sync
   // before 1.3.1 wrote a "UniFi <tag>" prefix, so clean those up for this WAN as well.
   const ownedComments = [wanTag, "UniFi " + wanTag];
@@ -161,17 +206,29 @@ async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
     const listId = list.id;
     console.log(`[IP List] Found list "${LIST_NAME}" (${listId})`);
 
-    // 7b. Fetch the current entries
-    const itemsRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/rules/lists/${listId}/items`, {
-      headers: { "Authorization": `Bearer ${apiToken}` }
-    });
-    const itemsData = await itemsRes.json();
+    // 7b. Fetch the current entries. The items endpoint is cursor-paginated
+    // (per_page, result_info.cursors): read EVERY page, otherwise the
+    // replace-all PUT below would silently drop whatever sits beyond
+    // page one.
+    const itemsUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/rules/lists/${listId}/items`;
+    let currentItems = [];
+    let cursor = null;
+    do {
+      const pageUrl = cursor
+        ? `${itemsUrl}?per_page=100&cursor=${encodeURIComponent(cursor)}`
+        : `${itemsUrl}?per_page=100`;
+      const itemsRes = await fetch(pageUrl, {
+        headers: { "Authorization": `Bearer ${apiToken}` }
+      });
+      const itemsData = await itemsRes.json();
 
-    if (!itemsData.success) {
-      console.warn(`[IP List] Could not read items of list "${LIST_NAME}" (non-fatal)`, itemsData.errors);
-      return;
-    }
-    const currentItems = itemsData.result || [];
+      if (!itemsData.success) {
+        console.warn(`[IP List] Could not read items of list "${LIST_NAME}" (non-fatal)`, itemsData.errors);
+        return;
+      }
+      currentItems.push(...(itemsData.result || []));
+      cursor = itemsData.result_info?.cursors?.after || null;
+    } while (cursor);
     console.log(`[IP List] List "${LIST_NAME}" currently has ${currentItems.length} entries`);
 
     // 7c. Filter and strictly map only allowed properties ({ ip, comment })
