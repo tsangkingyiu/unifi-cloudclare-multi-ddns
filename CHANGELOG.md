@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - **Non-blocking & Non-fatal:** List synchronization runs in the background via `ctx.waitUntil()` and is wrapped in `try/catch`; any list-sync failure is logged (`[IP List]` prefix) without affecting the DDNS response (`good`/`nochg` still returned when DNS succeeded).
 
 ### Changed
+- **Observability Config:** Expanded `wrangler.toml` with full Workers Logs settings (`head_sampling_rate`, `invocation_logs`, `persist`), traces toggle and issue detection, so DDNS run logs (including the `[IP List]` steps) stream at full sampling.
 - The list `PUT` sends a **bare JSON item array** (`[{ip, comment}]`) — the payload format actually required by the Cloudflare API (`PUT /accounts/{account_id}/rules/lists/{list_id}/items`), which replaces all items and returns an async `operation_id`.
 
 ## [1.2.0] - 2026-04-16
