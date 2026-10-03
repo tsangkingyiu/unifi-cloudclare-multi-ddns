@@ -54,14 +54,14 @@ Every time a WAN interface's DNS record is updated (or verified as unchanged), t
 
 How entries are reconciled (per WAN interface):
 - The current list contents are fetched via the [List Items API](https://developers.cloudflare.com/api/resources/rules/subresources/lists/subresources/items/methods/list/), then the list is overwritten via `PUT` with a **bare JSON array** of items (the format the Cloudflare API expects).
-- Any entry whose comment is **not** `"UniFi " + wanTag` is kept untouched — manually added IPs, other lists of WAN tags such as `UniFi WAN2`, etc.
-- This WAN's previous entry (comment `UniFi WAN1` for tag `WAN1`) — if any — is replaced by the new IP tagged `comment: "UniFi " + wanTag`.
+- Any entry whose comment is **not** this WAN's tag (`wanTag`) is kept untouched — manually added IPs and entries for other WANs such as `WAN2`. Entries carrying the legacy `UniFi <tag>` prefix for this WAN (written by versions before 1.3.1) are cleaned up/migrated on the next update.
+- This WAN's previous entry (`comment` equal to `wanTag`, e.g. `WAN1`) — if any — is replaced by the new IP tagged `comment: "WAN1"`.
 - With both WANs updating, the list ends up containing all WAN IPs, each tagged with its interface:
 
   ```json
   [
-    { "ip": "203.0.113.10", "comment": "UniFi WAN1" },
-    { "ip": "198.51.100.77", "comment": "UniFi WAN2" },
+    { "ip": "203.0.113.10", "comment": "WAN1" },
+    { "ip": "198.51.100.77", "comment": "WAN2" },
     { "ip": "10.0.0.99", "comment": "office static ip" }
   ]
   ```
