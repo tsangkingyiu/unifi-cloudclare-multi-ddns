@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.2] - 2026-10-03
+### Fixed
+- **List PUT Payload Compatibility:** The replace-all `PUT` on `/accounts/{account_id}/rules/lists/{list_id}/items` now sends the wrapped `{"items": [...]}` payload first and automatically retries with the bare item-array payload (documented by the current OpenAPI spec and official SDKs) when the API rejects it with `filters.api.invalid_json` (code 10026). The sync is now compatible with every Cloudflare Lists API generation; failures remain non-fatal and logged.
+
 ## [1.3.1] - 2026-10-03
 ### Changed
 - **List Entry Tags:** WAF List `my_trusted_ips` entries are now tagged with the raw WAN tag (`comment: "WAN1"` / `"WAN2"`, matching the UniFi username and DNS record comment) instead of the `UniFi WAN1` / `UniFi WAN2` prefix.
