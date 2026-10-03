@@ -174,53 +174,41 @@ async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
     const currentItems = itemsData.result || [];
     console.log(`[IP List] List "${LIST_NAME}" currently has ${currentItems.length} entries`);
 
-    // 7c. Keep every entry that does NOT belong to THIS WAN interface (manual IPs and
-    // entries tagged for other WANs survive), then append/update ours with the raw tag.
-    const updatedItems = currentItems.filter(item => !ownedComments.includes(item.comment));
-    updatedItems.push({ ip: ip, comment: wanTag });
+    // 7c. Filter and strictly map only allowed properties ({ ip, comment })
+    // Stripping server metadata (id, created_on, modified_on) avoids 10026 invalid_json
+    const updatedItems = currentItems
+      .filter(item => item && !ownedComments.includes(item.comment))
+      .map(item => ({
+        ip: item.ip,
+        comment: item.comment || ""
+      }));
 
-    // 7d. Overwrite the list with the reconciled entries.
-    // The replace-all PUT has shipped two body shapes across API generations:
-    //   - wrapped: {"items": [ {ip, comment}, ... ]}  (classic format)
-    //   - bare:    [ {ip, comment}, ... ]             (current docs/SDK format)
-    // Some deployments reject the shape they do not expect with
-    // filters.api.invalid_json (code 10026). Send the wrapped form first and fall back
-    // to the bare array when rejected — keeps the sync working on every API generation.
+    // Append current WAN interface IP
+    updatedItems.push({
+      ip: ip,
+      comment: wanTag
+    });
+
+    // 7d. Overwrite list using the canonical bare array schema
     const putUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/rules/lists/${listId}/items`;
-    const putHeaders = {
-      "Authorization": `Bearer ${apiToken}`,
-      "Content-Type": "application/json"
-    };
-    const payloadShapes = [
-      { label: "wrapped {items}", body: JSON.stringify({ items: updatedItems }) },
-      { label: "bare item array", body: JSON.stringify(updatedItems) },
-    ];
+    console.log(`[IP List] Writing ${updatedItems.length} sanitized entries:`, JSON.stringify(updatedItems));
 
-    let lastErrors = null;
-    for (const shape of payloadShapes) {
-      console.log(`[IP List] Writing ${updatedItems.length} entries (${ip} tagged "${wanTag}", payload: ${shape.label})`);
-      const putRes = await fetch(putUrl, {
-        method: "PUT", // Replace all items in the list
-        headers: putHeaders,
-        body: shape.body
-      });
-      const putData = await putRes.json();
+    const putRes = await fetch(putUrl, {
+      method: "PUT",
+      headers: {
+        "Authorization": `Bearer ${apiToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(updatedItems)
+    });
+    const putData = await putRes.json();
 
-      if (putData.success) {
-        console.log(`[Success] WAF List "${LIST_NAME}" synchronized: ${ip} tagged "${wanTag}" (payload: ${shape.label}, bulk op: ${putData.result?.operation_id || "n/a"})`);
-        return;
-      }
-      lastErrors = putData.errors;
-
-      const shapeMismatch = (putData.errors || []).some(err => err.code === 10026 || /invalid_json/i.test(err.message || ""));
-      if (!shapeMismatch) {
-        console.warn(`[IP List] Failed to replace items in list "${LIST_NAME}" (non-fatal)`, putData.errors);
-        return;
-      }
-      console.warn(`[IP List] API rejected ${shape.label} payload (10026 invalid_json); retrying with alternate shape`);
+    if (putData.success) {
+      console.log(`[Success] WAF List "${LIST_NAME}" synchronized: ${ip} tagged "${wanTag}" (bulk op: ${putData.result?.operation_id || "n/a"})`);
+      return;
+    } else {
+      console.warn(`[IP List] Failed to replace items in list "${LIST_NAME}" (non-fatal)`, putData.errors);
     }
-
-    console.warn(`[IP List] Failed to replace items in list "${LIST_NAME}" with any payload shape (non-fatal)`, lastErrors);
   } catch (e) {
     // Any failure here is logged and swallowed: the DDNS workflow must not be affected.
     console.error("[IP List] Synchronization failed (non-fatal)", e?.message || e);
