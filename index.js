@@ -180,24 +180,47 @@ async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
     updatedItems.push({ ip: ip, comment: wanTag });
 
     // 7d. Overwrite the list with the reconciled entries.
-    // NOTE: the Cloudflare API expects a bare item array here (NOT {"items": [...]}).
-    console.log(`[IP List] Writing ${updatedItems.length} entries (${ip} tagged "${wanTag}")`);
-    const putRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/rules/lists/${listId}/items`, {
-      method: "PUT", // Replace all items in the list
-      headers: {
-        "Authorization": `Bearer ${apiToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(updatedItems)
-    });
-    const putData = await putRes.json();
+    // The replace-all PUT has shipped two body shapes across API generations:
+    //   - wrapped: {"items": [ {ip, comment}, ... ]}  (classic format)
+    //   - bare:    [ {ip, comment}, ... ]             (current docs/SDK format)
+    // Some deployments reject the shape they do not expect with
+    // filters.api.invalid_json (code 10026). Send the wrapped form first and fall back
+    // to the bare array when rejected — keeps the sync working on every API generation.
+    const putUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/rules/lists/${listId}/items`;
+    const putHeaders = {
+      "Authorization": `Bearer ${apiToken}`,
+      "Content-Type": "application/json"
+    };
+    const payloadShapes = [
+      { label: "wrapped {items}", body: JSON.stringify({ items: updatedItems }) },
+      { label: "bare item array", body: JSON.stringify(updatedItems) },
+    ];
 
-    if (!putData.success) {
-      console.warn(`[IP List] Failed to replace items in list "${LIST_NAME}" (non-fatal)`, putData.errors);
-      return;
+    let lastErrors = null;
+    for (const shape of payloadShapes) {
+      console.log(`[IP List] Writing ${updatedItems.length} entries (${ip} tagged "${wanTag}", payload: ${shape.label})`);
+      const putRes = await fetch(putUrl, {
+        method: "PUT", // Replace all items in the list
+        headers: putHeaders,
+        body: shape.body
+      });
+      const putData = await putRes.json();
+
+      if (putData.success) {
+        console.log(`[Success] WAF List "${LIST_NAME}" synchronized: ${ip} tagged "${wanTag}" (payload: ${shape.label}, bulk op: ${putData.result?.operation_id || "n/a"})`);
+        return;
+      }
+      lastErrors = putData.errors;
+
+      const shapeMismatch = (putData.errors || []).some(err => err.code === 10026 || /invalid_json/i.test(err.message || ""));
+      if (!shapeMismatch) {
+        console.warn(`[IP List] Failed to replace items in list "${LIST_NAME}" (non-fatal)`, putData.errors);
+        return;
+      }
+      console.warn(`[IP List] API rejected ${shape.label} payload (10026 invalid_json); retrying with alternate shape`);
     }
 
-    console.log(`[Success] WAF List "${LIST_NAME}" synchronized: ${ip} tagged "${wanTag}" (bulk op: ${putData.result?.operation_id || "n/a"})`);
+    console.warn(`[IP List] Failed to replace items in list "${LIST_NAME}" with any payload shape (non-fatal)`, lastErrors);
   } catch (e) {
     // Any failure here is logged and swallowed: the DDNS workflow must not be affected.
     console.error("[IP List] Synchronization failed (non-fatal)", e?.message || e);
