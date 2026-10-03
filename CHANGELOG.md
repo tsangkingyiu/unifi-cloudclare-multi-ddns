@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-10-03
+### Changed
+- **List Entry Tags:** WAF List `my_trusted_ips` entries are now tagged with the raw WAN tag (`comment: "WAN1"` / `"WAN2"`, matching the UniFi username and DNS record comment) instead of the `UniFi WAN1` / `UniFi WAN2` prefix.
+- **Legacy Cleanup:** Entries still tagged in the previous `UniFi <tag>` format for the same WAN are removed (migrated to the raw tag) on the next update; entries of other WANs and manually added IPs are untouched.
+
 ## [1.3.0] - 2026-10-03
 ### Added
 - **WAF IP List Sync:** After a successful (or unchanged/verified) DNS update, the Worker synchronizes this WAN's IP into the account-level Cloudflare WAF IP List `my_trusted_ips`. Entries tagged for other WAN interfaces (`UniFi WAN2`, ...) and manually added IPs are preserved; this WAN's entry is appended/updated with `comment: "UniFi " + wanTag`.

@@ -112,8 +112,10 @@ export default {
 //
 // Keeps the account-level Cloudflare List "my_trusted_ips" in sync with this WAN
 // interface's current IP so WAF custom rules (e.g. "ip.src in $my_trusted_ips") keep
-// trusting the gateway. Entries tagged for other WAN interfaces ("UniFi WAN2", ...) and
+// trusting the gateway. Entries tagged for other WAN interfaces ("WAN2", ...) and
 // manually added IPs are preserved verbatim.
+// Entries are tagged with the RAW WAN tag (comment "WAN1"/"WAN2"), matching the
+// username in UniFi and the DNS record comment.
 //
 // This step is NON-BLOCKING and NON-FATAL: it must never change the DDNS response the
 // UniFi gateway receives ("good"/"nochg" whenever the DNS A record succeeded).
@@ -134,7 +136,9 @@ async function scheduleListSync(ctx, apiToken, accountId, wanTag, ip) {
 
 async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
   const LIST_NAME = "my_trusted_ips";
-  const wanComment = "UniFi " + wanTag;
+  // This WAN's entries are tagged with the raw WAN tag ("WAN1"); versions of the sync
+  // before 1.3.1 wrote a "UniFi <tag>" prefix, so clean those up for this WAN as well.
+  const ownedComments = [wanTag, "UniFi " + wanTag];
 
   try {
     // 7a. Locate the named account-level WAF IP List
@@ -171,13 +175,13 @@ async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
     console.log(`[IP List] List "${LIST_NAME}" currently has ${currentItems.length} entries`);
 
     // 7c. Keep every entry that does NOT belong to THIS WAN interface (manual IPs and
-    // entries tagged for other WANs survive), then append/update ours.
-    const updatedItems = currentItems.filter(item => item.comment !== "UniFi " + wanTag);
-    updatedItems.push({ ip: ip, comment: "UniFi " + wanTag });
+    // entries tagged for other WANs survive), then append/update ours with the raw tag.
+    const updatedItems = currentItems.filter(item => !ownedComments.includes(item.comment));
+    updatedItems.push({ ip: ip, comment: wanTag });
 
     // 7d. Overwrite the list with the reconciled entries.
     // NOTE: the Cloudflare API expects a bare item array here (NOT {"items": [...]}).
-    console.log(`[IP List] Writing ${updatedItems.length} entries (${ip} tagged "${wanComment}")`);
+    console.log(`[IP List] Writing ${updatedItems.length} entries (${ip} tagged "${wanTag}")`);
     const putRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/rules/lists/${listId}/items`, {
       method: "PUT", // Replace all items in the list
       headers: {
@@ -193,7 +197,7 @@ async function syncTrustedIpsList(apiToken, accountId, wanTag, ip) {
       return;
     }
 
-    console.log(`[Success] WAF List "${LIST_NAME}" synchronized: ${ip} tagged "${wanComment}" (bulk op: ${putData.result?.operation_id || "n/a"})`);
+    console.log(`[Success] WAF List "${LIST_NAME}" synchronized: ${ip} tagged "${wanTag}" (bulk op: ${putData.result?.operation_id || "n/a"})`);
   } catch (e) {
     // Any failure here is logged and swallowed: the DDNS workflow must not be affected.
     console.error("[IP List] Synchronization failed (non-fatal)", e?.message || e);
